@@ -108,7 +108,7 @@ To generate molecules for crossdock test set:
 python sample_crossdock_mols.py --results-path results/ --data-path $(path-to-crossdock-dataset) --use-anchor-model --anchor-model anchor-model.ckpt --n-samples 20 --exp-name test-crossdock --diff-model pocket-gvp.ckpt --device cuda:0 
 ```
 
-<img src="assets/generated_mols_pocket.png" width=800>
+<img src="assets/generated_mols_pocket.png" width=500>
 
 To sample molecules from a pdb file:
 first run fpocket and identify the correct pocket using:
@@ -132,6 +132,7 @@ python scaffold_based_mol_generation.py --data-path $(path-to-crossdock) --resul
 
 - In order to select the anchor you can add the `--custom-anchors` argument and provide the ids of custom anchors (starts from 0 and based on atomic ids in the scaffold molecule).
 
+<img src="assets/scaffold_optim.png" width=500>
 
 
 
