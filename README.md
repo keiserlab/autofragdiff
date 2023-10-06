@@ -1,7 +1,7 @@
 # autofragdiff
 =======
 
-<img src="assets/movie.gif" width=500 height=500>
+<img src="assets/movie.gif" width=500 height=400>
 
 
 # Dependencies
