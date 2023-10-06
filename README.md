@@ -1,5 +1,7 @@
-# autofragdiff
-=======
+# AutoFragDiff
+==============================================================
+
+This repository is the official implementation of Autoregressive fragment based diffusion model for target-aware ligand design
 
 <img src="assets/movie.gif" width=500 height=400>
 
@@ -19,7 +21,7 @@
 
 ## Create conda environment
 ```
-conda create -n gfragdiff
+conda create -n autofragdiff
 pip install rdkit
 conda install -c conda-forge openbabel
 pip3 install torch torchvision torchaudio 
