@@ -1,5 +1,4 @@
 # AutoFragDiff
-==============================================================
 
 This repository is the official implementation of Autoregressive fragment based diffusion model for target-aware ligand design
 
