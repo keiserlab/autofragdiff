@@ -117,7 +117,7 @@ fpocket -f $pdb.pdb
 fpocket gives multiple pockets, you can visualize the identify the right pocket and run sampling
 
 ```
-python sample_from_pocket.py --result-path results --pdb $pdbname --use-anchor-model --anchor-model anchor-model.ckpt --n-samples 10 --device cuda:0 --pocket-number 1 
+python sample_from_pocket.py --result-path results --pdb $pdbname --anchor-model anchor-model.ckpt --n-samples 10 --device cuda:0 --pocket-number 1 
 ```
 
 ## Scaffold-based molecule property optimization
@@ -126,7 +126,7 @@ For scaffold-based optimization you need the pdb file of the pocket and the sdf 
 
 Scaffold-extension for crossdock test set
 ```
-python scaffold_based_mol_generation.py --data-path $(path-to-crossdock) --results-path scaffold-gen --use-anchor-model --anchor-model anchor-model.ckpt --n-samples 20 --exp-name scaffold-gen --diff-model pocket-gvp.ckpt --device cuda:0 
+python extend_scaffold_crossdock.py --data-path $(path-to-crossdock) --results-path scaffold-gen --anchor-model anchor-model.ckpt --n-samples 20 --exp-name scaffold-gen --diff-model pocket-gvp.ckpt --device cuda:0 
 ```
 
 - In order to select the anchor you can add the `--custom-anchors` argument and provide the ids of custom anchors (starts from 0 and based on atomic ids in the scaffold molecule).
