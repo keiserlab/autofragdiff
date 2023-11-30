@@ -1,31 +1,25 @@
-import json
 import numpy as np
-import pandas as pd
 import os
-from tqdm import tqdm 
-from itertools import combinations
 import argparse
 
-from rdkit import Chem
 import torch
 import time
-import shutil
-from pathlib import Path
-import torch.nn.functional as F
 
 from utils.volume_sampling import sample_discrete_number, bin_edges, prob_dist_df
 from utils.volume_sampling import remove_output_files, run_fpocket, extract_values
 from utils.templates import get_one_hot, get_pocket
+from utils.templates import add_hydrogens, extract_hydrogen_coordinates
 
 from src.lightning_anchor_gnn import AnchorGNN_pl
 from src.lightning import AR_DDPM
+from src.noise import cosine_beta_schedule
 from scipy.spatial import distance
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa, three_to_one
 from Bio.PDB.Polypeptide import is_aa
 
 from analysis.reconstruct_mol import reconstruct_from_generated
-from analysis.vina_docking import VinaDockingTask
+from src.const import prot_mol_lj_rm, CROSSDOCK_LJ_RM
 
 from rdkit.Chem import rdmolfiles
 from sampling.sample_mols import generate_mols_for_pocket
@@ -43,8 +37,6 @@ parser.add_argument('--results-path', type=str, default='results',
 parser.add_argument('--pdb', type=str, help='path to the pdb file')
 parser.add_argument('--data-path', action='store', type=str, default='/srv/home/mahdi.ghorbani/FragDiff/crossdock',
                         help='path to the test data for generating molecules')
-parser.add_argument('--use-anchor-model', action='store_true', default=False,
-                    help='Whether to use an anchor prediction model')
 parser.add_argument('--anchor-model', type=str, default='anchor_model.ckpt',
                     help='path to the anchor model. Note that for guidance, the anchor model should incorporate the conditionals')
 parser.add_argument('--n-samples', type=int, default=10,
@@ -54,8 +46,10 @@ parser.add_argument('--exp-name', type=str, default='exp-1',
 parser.add_argument('--diff-model', type=str, default='diff-model.ckpt',
                     help='path to the diffusion model checkpoint')
 parser.add_argument('--device', type=str, default='cuda:0')
+parser.add_argument('--clash-guidance', action='store_true', default=False, help='enable clash guidance')
 parser.add_argument('--rejection-sampling', action='store_true', default=False, help='enable rejection sampling')
 parser.add_argument('--pocket-number', type=int, default=1, help='pocket number for fpocket')
+
 
 def get_one_hot(atom, atoms_dict):
     one_hot = np.zeros(len(atoms_dict))
@@ -156,11 +150,8 @@ if __name__ == '__main__':
     model = AR_DDPM.load_from_checkpoint(diff_model_checkpoint, device=torch_device) # load diffusion model
     model = model.to(torch_device)
 
-    if args.use_anchor_model is not None:
-        anchor_model = AnchorGNN_pl.load_from_checkpoint(anchor_checkpoint, device=torch_device)
-        anchor_model = anchor_model.to(torch_device)
-    else:
-        anchor_model = None
+    anchor_model = AnchorGNN_pl.load_from_checkpoint(anchor_checkpoint, device=torch_device)
+    anchor_model = anchor_model.to(torch_device)
 
     if not os.path.exists(args.results_path):
         print('creating results directory')
@@ -186,6 +177,15 @@ if __name__ == '__main__':
     except:
         raise ValueError('fpocket failed!')
         #exit()
+
+    add_H = True
+
+    if add_H:
+        add_hydrogens(pdb)
+        prot_name_with_H = pdb[:-4] + '_H.pdb'
+
+        H_coords = extract_hydrogen_coordinates(prot_name_with_H)
+        H_coords = torch.tensor(H_coords).float().to(torch_device)
 
     # ---------------  make a grid box around the pocket ----------------
     min_coords = pocket_coords.min(axis=0) - 2.5 #
@@ -214,8 +214,10 @@ if __name__ == '__main__':
 
     grids = torch.tensor(grids)
     all_grids = [] # list of grids
+    all_H_coords = []
     for i in range(n_samples):
         all_grids.append(grids) 
+        all_H_coords.append(H_coords)
     
     pocket_vol = len(grids)
     max_mol_sizes = []
@@ -234,6 +236,13 @@ if __name__ == '__main__':
     possible_pocket_anchors = np.argsort((alpha_spheres_pocket_distances < 4.5).sum(1))[::-1][:7]
 
     pocket_anchors = np.random.choice(possible_pocket_anchors, size=n_samples, replace=True)
+   
+    prot_mol_lj_rm = torch.tensor(prot_mol_lj_rm).to(torch_device)
+    mol_mol_lj_rm = torch.tensor(CROSSDOCK_LJ_RM).to(torch_device) / 100
+
+    lj_weight_scheduler = cosine_beta_schedule(500, s=0.01, raise_to_power=2)
+    weights = 1 - lj_weight_scheduler 
+    weights = np.clip(weights, a_min=0.1, a_max=1.)
     x, h, mol_masks = generate_mols_for_pocket(n_samples=n_samples,
                                                num_frags=8,
                                                pocket_size=pocket_size,
@@ -244,11 +253,15 @@ if __name__ == '__main__':
                                                diff_model=model,
                                                device=torch_device,
                                                return_all=False,
-                                               prot_path=pdb,
                                                max_mol_sizes=max_mol_sizes,
                                                all_grids=all_grids,
                                                rejection_sampling=args.rejection_sampling,
-                                               pocket_anchors=pocket_anchors)
+                                               pocket_anchors=pocket_anchors,
+                                               lj_guidance=args.clash_guidance,
+                                               prot_mol_lj_rm=prot_mol_lj_rm,
+                                               mol_mol_lj_rm=mol_mol_lj_rm,
+                                               all_H_coords=all_H_coords,
+                                               guidance_weights=weights,)
 
 
     x = x.cpu().numpy()

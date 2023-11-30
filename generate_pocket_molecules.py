@@ -1,20 +1,13 @@
-import json
 import numpy as np
 import pandas as pd
 import os
-from tqdm import tqdm 
-from itertools import combinations
 import argparse
 
-from rdkit import Chem
 import torch
 import time
 import shutil
-from pathlib import Path
-import torch.nn.functional as F
 
 from utils.volume_sampling import sample_discrete_number, bin_edges, prob_dist_df
-from utils.volume_sampling import remove_output_files, run_fpocket, extract_values
 from utils.templates import get_one_hot, get_pocket
 
 from src.lightning_anchor_gnn import AnchorGNN_pl
@@ -22,7 +15,6 @@ from src.lightning import AR_DDPM
 from scipy.spatial import distance
 
 from analysis.reconstruct_mol import reconstruct_from_generated
-from analysis.vina_docking import VinaDockingTask
 
 from rdkit.Chem import rdmolfiles
 from sampling.sample_mols import generate_mols_for_pocket

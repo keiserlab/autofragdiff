@@ -5,8 +5,8 @@ import math
 
 from src import utils
 from src.noise import GammaNetwork, PredefinedNoiseSchedule
-from typing import Union
 from src.dynamics_gvp import DynamicsWithPockets
+#from torch_scatter import scatter_mean
 
 class AREDM(torch.nn.Module):
     def __init__(
@@ -22,7 +22,7 @@ class AREDM(torch.nn.Module):
             loss_type='l2',
             norm_values=(1., 4., 1.),
             norm_biases=(None, 0., 0.),
-            anchors_context=True, # whether anchors and scaffolds should both be used as context or just the scaffold
+            anchors_context=True, #
             center_of_mass='anchors',
     ):
         super().__init__()
@@ -44,8 +44,8 @@ class AREDM(torch.nn.Module):
         self.center_of_mass = center_of_mass
 
     def forward(self, x, h, pocket_x, pocket_h, extension_mask, scaffold_mask, anchors, pocket_anchors, pocket_mask):
-        """ In the training, we take the scaffold of the molecule at step i and take a single step forward for predicting the next extension of the molecule
-        input:
+        """ 
+        inputs:
             x: [B, N_l, 3] coordinates of molecules
             h: [B, N_l, lig_nf] features of moleucles
             extension_masks: [B, N_l] mask on extension atoms
@@ -105,7 +105,6 @@ class AREDM(torch.nn.Module):
         # computing basic error (further used for computing NLL and L2 loss)
         error_t = (eps_t - eps_t_hat) ** 2 # [B, N, nf+3]
         error_t = self.sum_except_batch(error_t)
-        nan_mask = (eps_t_hat == 1e-5).any(dim=2).any(dim=1)
 
         normalization = (self.n_dims + self.lig_nf) * self.numbers_of_nodes(extension_mask) 
         l2_loss = error_t / normalization
@@ -141,19 +140,8 @@ class AREDM(torch.nn.Module):
         return delta_log_px, kl_prior, loss_term_t, loss_term_0, l2_loss, noise_t, noise_0
 
     @torch.no_grad()
-    def sample_chain_single_fragment(self, x, h, extension_mask, scaffold_mask, anchors, pocket_x, pocket_h, pocket_mask, pocket_anchors, keep_frames=None):
-        """
-        inputs:
-            x: [B, Ns, 3] coordinates of scaffold
-            h: [B, Ns, nf] features of atoms generated so far
-            extension_mask: [B, Ns] mask on extension atoms
-            scaffold_mask: [B, Ns] mask on scaffold atoms
-            anchors: [B, Ns] mask on anchor atoms
-            pocket_x: [B, Np, 3] coordinates of pocket
-            pocket_h: [B, Np, nf_p] features of pocket atoms
-            pocket_mask: [B, Np] masking on all the pocket atoms
-            pocket_anchors: [B, Np] masking on anchor atoms
-        """
+    def sample_chain_single_fragment(self, x, h, extension_mask, scaffold_mask, anchors, pocket_x, pocket_h, pocket_mask, pocket_anchors, lj_guidance=False, prot_mol_lj_rm=None, all_H_coords=None, guidance_weights=None, keep_frames=None):
+
         n_samples = x.size(0)
         n_nodes = x.size(1)
 
@@ -193,19 +181,31 @@ class AREDM(torch.nn.Module):
                 pocket_mask=pocket_mask,
             )
 
-            node_masks = (scaffold_mask.bool() | extension_mask.bool()).float()
-
             # Move back to center of mass again
-            if self.center_of_mass == 'anchors':
-                anchor_pos = torch.zeros((n_samples,3), device=x.device)
-                row1, col1 = torch.where(pocket_anchors)
-                anchor_pos[row1] = pocket_x[row1, col1]
+            #if self.center_of_mass == 'anchors':
+            #    anchor_pos = torch.zeros((n_samples,3), device=x.device)
+            #    row1, col1 = torch.where(pocket_anchors)
+            #    anchor_pos[row1] = pocket_x[row1, col1]
 
-                row2, col2 = torch.where(anchors)
-                anchor_pos[row2] = x[row2, col2]
-                z[:,:,:3] = z[:,:,:3] - anchor_pos.unsqueeze(1) * node_masks.unsqueeze(-1)
-                pocket_xh[:,:,:3] = pocket_x[:,:,:3] - anchor_pos.unsqueeze(1) * pocket_mask.unsqueeze(-1)
+            #    row2, col2 = torch.where(anchors)
+            #    anchor_pos[row2] = x[row2, col2]
+            #    z[:,:,:3] = z[:,:,:3] - anchor_pos.unsqueeze(1) * node_masks.unsqueeze(-1)
+            #    pocket_xh[:,:,:3] = pocket_x[:,:,:3] - anchor_pos.unsqueeze(1) * pocket_mask.unsqueeze(-1)
+            
+            # NOTE: we are not doing LJ guidance in the last 20 steps
+            if lj_guidance and s < 400:
+                with torch.enable_grad():
+                    lig_x, lig_h = z[:, :, :self.n_dims], z[:, :, self.n_dims:]
+                    lig_x.requires_grad = True
 
+                    #h_ext.requires_grad = True
+                    if extension_mask.sum() != 0:
+                        lj_prot_lig = self.compute_lj(lig_x, lig_h, extension_mask, pocket_xh, pocket_mask, prot_mol_lj_rm=prot_mol_lj_rm, all_H_coords=all_H_coords)
+                        lj_grad = torch.autograd.grad(lj_prot_lig, lig_x, retain_graph=True)[0] # 
+                        energy_prot_mol_lj = 0.3 * lj_grad * extension_mask.unsqueeze(-1) #  
+                        energy_total = energy_prot_mol_lj * guidance_weights[s]
+                        z[:, :, :self.n_dims] = z[:, :, :self.n_dims] - energy_total 
+    
             write_index = (s * keep_frames) // self.T
             chain[write_index] = self.unnormalize_z(z)
         
@@ -222,6 +222,69 @@ class AREDM(torch.nn.Module):
 
         chain[0] = torch.cat([x_out, h_out], dim=2)
         return x_out, h_out, chain
+        
+    def compute_lj(self, lig_x, lig_h, extension_mask, pocket_xh, pocket_mask, prot_mol_lj_rm, all_H_coords):
+        """ compute the LJ between protein and ligand 
+        lig_x: [B, N, 3]
+        lig_h: [B, N, hf]
+        """
+
+        #lig_x.requires_grad = True
+        B = extension_mask.shape[0]
+        lj_prot_lig = torch.tensor(0., device=lig_x.device)
+
+        n = 0
+        for j in range(B):
+            num_atoms = extension_mask[j].sum()
+            if num_atoms == 0:
+                continue # no extension atoms
+            n += 1
+
+            x = lig_x[j][extension_mask[j].bool()]  # [N_l, 3] # onlly extension atoms
+            h = lig_h[j][extension_mask[j].bool()]  # [N_l, hf] # only extension atoms
+
+            pocket_x = pocket_xh[j][pocket_mask[j].bool()][:, :self.n_dims] # [N_p, 3]
+            pocket_h = pocket_xh[j][pocket_mask[j].bool()][:, self.n_dims:][:,:4] # [N_p, hf]
+            h_coords = all_H_coords[j] # [N_p, 3]
+
+            # --------------- compute the LJ between protein and ligand --------------
+            dists = torch.cdist(x, pocket_x, p=2)
+            dists = torch.where(dists<0.5, 0.5, dists)
+            inds_lig = torch.argmax(h, dim=1) # [N_l]
+            inds_pocket = torch.argmax(pocket_h, dim=1).long() # [N_p]
+
+            rm = prot_mol_lj_rm[inds_lig][:, inds_pocket] # [N_l, N_p] 
+            lj = ((rm / dists) ** 12 - (rm / dists) ** 6) # [N_l, N_p]
+
+            lj[torch.isnan(lj)] = 0
+
+            lj = torch.clamp(lj, min=0, max=1000) # [N_l, N_p]
+
+            # -------------  compute the loss for h atoms ----------------
+            dists_h = torch.cdist(x, h_coords, p=2)
+            dists_h = torch.where(dists_h<0.5, 0.5, dists_h)
+            inds_H = torch.ones(len(h_coords), device=x.device).long() * 10 # index of H is 10 in the table
+            rm_h = prot_mol_lj_rm[inds_lig][:, inds_H]
+            lj_h = ((rm_h / dists_h) ** 12 - (rm_h / dists_h) ** 6) # [N_l, N_p]
+            
+            lj_h[torch.isnan(lj_h)] = 0 # remove nan values
+            lj_h = torch.clamp(lj_h, min=0, max=1000) # [N_l, N_p]
+
+            lj = lj.mean() 
+            lj_h = lj_h.mean()
+
+            lj_prot_lig = (lj_prot_lig + (lj + lj_h))
+        
+        lj_prot_lig = lj_prot_lig / n
+
+        return lj_prot_lig
+
+    @staticmethod
+    def get_batch_mask(mask, device):
+        n_nodes = mask.float().sum(dim=1).int()
+        batch_size = mask.shape[0]
+        batch_mask = torch.cat([torch.ones(n_nodes[i]) * i for i in range(batch_size)]).long().to(device)
+        return batch_mask
     
     def sample_p_zs_given_zt_only_extension(self, s, t, z_t, pocket_xh, scaffold_mask, extension_mask, anchors, pocket_anchors, pocket_mask):
         """ samples zs ~ p(zs|zt) only used during sampling. Samples only the extension features and coords """

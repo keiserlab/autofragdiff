@@ -1,31 +1,10 @@
-import json
 import numpy as np
 import pandas as pd
-import os
-from tqdm import tqdm 
-from itertools import combinations
-import argparse
-
-from rdkit import Chem
 import torch
-import time
-import shutil
-from pathlib import Path
-import torch.nn.functional as F
 
-from utils.volume_sampling import remove_output_files, run_fpocket, extract_values
-from utils.templates import get_one_hot, get_pocket
-from utils.templates import create_template_for_pocket_anchor_prediction, create_template_for_pocket_mol, \
-                          get_anchors_pocket, random_sample_anchors 
+from utils.templates import create_template_for_pocket_anchor_prediction, create_template_for_pocket_mol
 from utils.sample_frag_size import sample_fragment_size, fragsize_prob_df, bounds
-from sampling.rejection_sampling import compute_number_of_clashes
-
-from src.lightning_anchor_gnn import AnchorGNN_pl
-from src.lightning import AR_DDPM
-from scipy.spatial import distance
-
-from scipy.spatial import distance
-from rdkit.Chem.Scaffolds import MurckoScaffold
+#from sampling.rejection_sampling import compute_number_of_clashes
 
 atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'B': 4, 'Br': 5, 'Cl': 6, 'P': 7, 'I': 8, 'F': 9}
 idx2atom = {0:'C', 1:'N', 2:'O', 3:'S', 4:'B', 5:'Br', 6:'Cl', 7:'P', 8:'I', 9:'F'}
@@ -47,15 +26,18 @@ def extend_scaffold(n_samples,
                     prot_path=None,
                     custom_anchors=None,
                     all_grids=None,
+                    lj_guidance=True,
+                    prot_mol_lj_rm=None,
+                    mol_mol_lj_rm=None,
+                    all_H_coords=None,
+                    guidance_weights=None,
                     ): 
-    
     """ 
     pocket_corods: [Np, 3]
     pocket_oneoht: [Np, hp]
     x: [B, Ns, 3]
     h: [B, Ns, hf]
     """
-    anchors_context = True
     center_of_mass = 'anchors'
     all_frag_sizes = np.zeros((n_samples, num_frags+1), dtype=np.int32) # num_frags+1 because we have the first scaffold
 
@@ -69,13 +51,13 @@ def extend_scaffold(n_samples,
     scaff_size = x.shape[1]
     pocket_size = pocket_coords.shape[0]
 
-    extension_masks = torch.ones(scaff_size, dtype=torch.float32, device=device) # extension_masks for the scaffol+pocket
-    scaffold_masks = torch.tensor(scaff_size, dtype=torch.float32, device=device) # scaffold_masks for the scaffol+pocket  
+    extension_masks = torch.ones(scaff_size, dtype=torch.float32, device=device) 
+    scaffold_masks = torch.tensor(scaff_size, dtype=torch.float32, device=device)
     
-    extension_masks = extension_masks.unsqueeze(0).repeat(n_samples, 1) # [B, Ns]
-    scaffold_masks = scaffold_masks.unsqueeze(0).repeat(n_samples, 1) # [B, Ns]
-    pocket_x = pocket_coords.unsqueeze(0).repeat(n_samples, 1, 1).to(device) # [B, Np, 3]
-    pocket_h = pocket_onehot.unsqueeze(0).repeat(n_samples, 1, 1).to(device) # [B, Np, 3]
+    extension_masks = extension_masks.unsqueeze(0).repeat(n_samples, 1) 
+    scaffold_masks = scaffold_masks.unsqueeze(0).repeat(n_samples, 1) 
+    pocket_x = pocket_coords.unsqueeze(0).repeat(n_samples, 1, 1).to(device)
+    pocket_h = pocket_onehot.unsqueeze(0).repeat(n_samples, 1, 1).to(device) 
 
     all_x.append(x)
     all_h.append(h)
@@ -152,7 +134,7 @@ def extend_scaffold(n_samples,
         mol_n_atoms = np.sum(all_frag_sizes, axis=1)
         if max_mol_sizes is not None:
             for idx, n in enumerate(max_mol_sizes):
-                if mol_n_atoms[idx] > n+6:
+                if mol_n_atoms[idx] > n+5: # +5 to account for smaller fragments
                     all_frag_sizes[idx, i] = 0
         print('mol sizes:', mol_n_atoms)
         # ------------------------------------------------------------------------------------------
@@ -198,6 +180,7 @@ def extend_scaffold(n_samples,
             # shift the grid points according to anchor
         for l in range(n_samples):
             all_grids[l] = all_grids[l] - anchor_pos[l].cpu()
+            all_H_coords[l] = all_H_coords[l] - anchor_pos[l]
 
         x, h, chain_0 = diff_model.edm.sample_chain_single_fragment(x=x,
                                                                     h=h,
@@ -208,7 +191,11 @@ def extend_scaffold(n_samples,
                                                                     pocket_mask=pocket_masks,
                                                                     anchors=anchors,
                                                                     pocket_anchors=pocket_anchors,
-                                                                    keep_frames=1)
+                                                                    keep_frames=1,
+                                                                    lj_guidance=lj_guidance,
+                                                                    prot_mol_lj_rm=prot_mol_lj_rm,
+                                                                    all_H_coords=all_H_coords,
+                                                                    guidance_weights=guidance_weights,)
                                                                     
 
         prev_ext_sizes = all_frag_sizes[:,i]  

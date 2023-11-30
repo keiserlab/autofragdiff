@@ -1,33 +1,12 @@
-import json
 import numpy as np
 import pandas as pd
-import os
-from tqdm import tqdm 
-from itertools import combinations
-import argparse
 
-from rdkit import Chem
 import torch
-import time
-import shutil
-from pathlib import Path
 import torch.nn.functional as F
 
-from utils.volume_sampling import sample_discrete_number, bin_edges, prob_dist_df
-from utils.volume_sampling import remove_output_files, run_fpocket, extract_values
-from utils.templates import get_one_hot, get_pocket
 from utils.templates import create_template_for_pocket_anchor_prediction, create_template_for_pocket_mol,get_anchors_pocket
 from utils.sample_frag_size import sample_fragment_size, fragsize_prob_df, bounds
-from sampling.rejection_sampling import compute_number_of_clashes
-
-from src.lightning_anchor_gnn import AnchorGNN_pl
-from src.lightning import AR_DDPM
-from scipy.spatial import distance
-
-from analysis.reconstruct_mol import reconstruct_from_generated
-from analysis.vina_docking import VinaDockingTask
-
-from rdkit.Chem import rdmolfiles
+from sampling.rejection_sampling import compute_number_of_clashes, compute_lj
 
 atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'B': 4, 'Br': 5, 'Cl': 6, 'P': 7, 'I': 8, 'F': 9}
 idx2atom = {0:'C', 1:'N', 2:'O', 3:'S', 4:'B', 5:'Br', 6:'Cl', 7:'P', 8:'I', 9:'F'}
@@ -36,8 +15,8 @@ pocket_atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3} # only 4 atoms types for po
 vdws = {'C': 1.7, 'N': 1.55, 'O': 1.52, 'S': 1.8, 'B': 1.92, 'Br': 1.85, 'Cl': 1.75, 'P': 1.8, 'I': 1.98, 'F': 1.47}
 
 def generate_mols_for_pocket(n_samples, 
-                             num_frags, 
-                             pocket_size, 
+                             num_frags,  # maximum number of fragments to generate
+                             pocket_size,  
                              pocket_coords, 
                              pocket_onehot, 
                              anchor_model, 
@@ -49,15 +28,14 @@ def generate_mols_for_pocket(n_samples,
                              all_grids=None,
                              rejection_sampling=False,
                              pocket_anchors=None,
-                             prot_path=None,
-                             rejection_criteria='clash'): # check if the generated fragment improves the vina score or not
+                             lj_guidance=True,
+                             prot_mol_lj_rm=None,
+                             mol_mol_lj_rm=None,
+                             all_H_coords=None,
+                             guidance_weights=None): # check if the generated fragment improves the vina score or not
     
-    # TODO: consider experimenting with random anchors and random number of atoms in fragments
     all_frag_sizes = np.zeros((n_samples, num_frags), dtype=np.int32)
-    anchors_context = True
     center_of_mass = 'anchors'
-    pocket_inds = pocket_onehot[:,:4].argmax(1).cpu().numpy()
-    pocket_atom_types = [idx2atom[a] for a in pocket_inds]
 
     all_x = []
     all_h = []
@@ -94,10 +72,10 @@ def generate_mols_for_pocket(n_samples,
                                                    anchors_scaffold=None,
                                                    anchors_pocket=anchors_pocket)
             
-            x = batch['positions'].to(device) # # [B, N, 3]
-            h = batch['one_hot'].to(device) # [B, N, 10]
-            pocket_x = batch['pocket_coords'].to(device) # [B, Np, 3]
-            pocket_h = batch['pocket_onehot'].to(device) # [B, Np, 25]
+            x = batch['positions'].to(device) 
+            h = batch['one_hot'].to(device) 
+            pocket_x = batch['pocket_coords'].to(device) 
+            pocket_h = batch['pocket_onehot'].to(device) 
 
             B = x.shape[0]
             Ns = x.shape[1]
@@ -122,6 +100,7 @@ def generate_mols_for_pocket(n_samples,
             
             for l in range(n_samples): # remove the COM for the grids at step 0
                 all_grids[l] = all_grids[l] - anchor_pos[l].cpu()
+                all_H_coords[l] = all_H_coords[l] - anchor_pos[l]
 
             x, h, chain_0 = diff_model.edm.sample_chain_single_fragment(x=x,
                                                                         h=h,
@@ -133,6 +112,10 @@ def generate_mols_for_pocket(n_samples,
                                                                         pocket_mask=pocket_masks,
                                                                         pocket_anchors=pocket_anchors,
                                                                         keep_frames=1,
+                                                                        lj_guidance=lj_guidance,
+                                                                        prot_mol_lj_rm=prot_mol_lj_rm,
+                                                                        all_H_coords=all_H_coords,
+                                                                        guidance_weights=guidance_weights
                                                                         )
 
             # mask the grids that have been occupied by the generated molecule
@@ -205,19 +188,22 @@ def generate_mols_for_pocket(n_samples,
 
             # ---------------------------------------------------------------------------------
             # --------------------------- Sample fragment size -------------------------------
- 
+
+            print('grid points around anchors', grid_points_anchor)
             frag_sizes = np.zeros((n_samples), dtype=np.int32)      
             for l in range(n_samples):
                 frag_sizes[l] = sample_fragment_size(int(grid_points_anchor[l]), bounds, fragsize_prob_df)
         
-            print('Sampled fragsizes', frag_sizes)
+            #print('Sampled fragsizes', frag_sizes)
             all_frag_sizes[:, i] = frag_sizes
-            print('fragment sizes: ', frag_sizes)
+            
             mol_n_atoms = np.sum(all_frag_sizes, axis=1)
             if max_mol_sizes is not None:
                 for idx, n in enumerate(max_mol_sizes):
-                    if mol_n_atoms[idx] > n+6: # add 6 to account for smaller fragment sizes
+                    if mol_n_atoms[idx] > n+4: # add 4 to account for smaller fragment sizes
+                        frag_sizes[idx] = 0
                         all_frag_sizes[idx, i] = 0
+            print('fragment sizes: ', frag_sizes)
             print('mol sizes:', mol_n_atoms)
             # -------------------------------------------------------------------------------------------------------
             # -------------------------------- generating fragment --------------------------------------------------
@@ -262,6 +248,7 @@ def generate_mols_for_pocket(n_samples,
             # shift the grid points according to anchor
             for l in range(n_samples):
                 all_grids[l] = all_grids[l] - anchor_pos[l].cpu()
+                all_H_coords[l] = all_H_coords[l] - anchor_pos[l]
 
             x, h, chain_0 = diff_model.edm.sample_chain_single_fragment(x=x,
                                                                         h=h,
@@ -273,45 +260,57 @@ def generate_mols_for_pocket(n_samples,
                                                                         anchors=anchors,
                                                                         pocket_anchors=pocket_anchors,
                                                                         keep_frames=1,
+                                                                        lj_guidance=lj_guidance,
+                                                                        prot_mol_lj_rm=prot_mol_lj_rm,
+                                                                        all_H_coords=all_H_coords,
+                                                                        guidance_weights=guidance_weights
                                                                         )
 
-            ## mask the grids that have been occupied by the generated molecule
-            for l in range(n_samples):
-                mol_mask = node_masks[l].cpu().bool()
-                mol_coords = x[l].cpu()[mol_mask]
-                mol_dists = torch.cdist(all_grids[l].float(), mol_coords)
-                mask_grids = (mol_dists < 2).any(dim=1) # mask based on 2 A distance
-                all_grids[l] = all_grids[l][~mask_grids]  
 
-            if rejection_sampling:        
+
+            # pocket_h -> [B, Np, 25]
+            # pocket_x -> [B, Np, 3]
+            rejected  = np.zeros(n_samples)
+            all_clashes = []
+            if rejection_sampling: 
+                # rejection sampling based on number of clashes or LJ energy     
+                #mol_mol_lj = torch.zeros(n_samples, device=x.device)
+                #prot_mol_lj = torch.zeros(n_samples, device=x.device)
+                #for m in range(n_samples):
+                #    if extension_masks[m].sum() > 0:
+                #        prot_mol_lj[m], mol_mol_lj[m] = compute_lj(lig_x=x[m], lig_h=h[m], extension_mask=extension_masks[m], scaffold_mask=scaffold_masks[m], pocket_x=pocket_x[m], pocket_h=pocket_h[m], pocket_mask=pocket_masks[m], prot_mol_lj_rm=prot_mol_lj_rm, all_H_coords=all_H_coords[m], mol_mol_lj_rm=mol_mol_lj_rm)
+
                 prev_ext_sizes = []
                 for s in range(len(x)):
                     mask = extension_masks[s].bool()
-                    h_mol = h[s].clone()
-                    x_mol = x[s].clone()[mask].cpu()
+                    h_mol = h[s][mask]
+                    x_mol = x[s][mask]
+                    pocket_coords_for_clash = pocket_x[s][pocket_masks[s].bool()]
+                    pocket_h_for_clash = pocket_h[s][pocket_masks[s].bool()][:,:4]
 
-                    atom_inds = h_mol[mask].cpu().numpy().argmax(axis=1)
-                    atom_types = [idx2atom[a] for a in atom_inds]
-                    atomic_nums = [CROSSDOCK_CHARGES[a] for a in atom_types]
-                    pocket_pos = pocket_x[s].clone().cpu()
                     num_atoms = x_mol.shape[0]
                     # TODO: compute number of clashes (only for the new fragment)
-                    _, _, _, num_clashes = compute_number_of_clashes(pocket_pos, x_mol, pocket_atom_types, atom_types) 
-                    print(num_clashes)
+                    if num_atoms > 0:
+                        num_clashes = compute_number_of_clashes(x_mol, h_mol, pocket_coords_for_clash, pocket_h_for_clash, all_H_coords[s], tolerace=0.5, prot_mol_lj_rm=prot_mol_lj_rm) 
+                    else:
+                        num_clashes = 0
 
+                    all_clashes.append(num_clashes)
                     reverted = False
-                    if num_clashes > 0: # if the vina score has increased 
-                        if (num_clashes / num_atoms) < 0.5: 
+                    if num_clashes > 2: 
+                        if (num_clashes / num_atoms) < 1.25: 
                             rand_num = np.random.rand(1)[0]
                             if rand_num < 0.5: # accept the new fragment
                                 # Revert back to the previous step (previous scaffold)
+                                rejected[s] = 1 # rejected the new fragment
                                 if len(all_x[i-1][s]) <= x.shape[1]: # TODO: going back to previous step for the 
                                     print(f'rejecting the fragment {i} for molecule {s}')
                                     x[s, :len(all_x[i-1][s]), :] = all_x[i-1][s] # this was reverting all x and h
                                     h[s, :len(all_h[i-1][s]), :] = all_h[i-1][s]
                                     pocket_x[s] = all_pocket_x[i-1][s]
-                                    all_grids[s] = total_grids[i-1][s]
-                                    
+                                    #all_grids[s] = total_grids[i-1][s]
+                                    all_grids[s] = all_grids[s] + anchor_pos[s].cpu() # shift back the grid points
+                                    all_H_coords[s] = all_H_coords[s] + anchor_pos[s] # shift back the H atoms
 
                                     x[s, len(all_x[i-1][s]):, :] = 0
                                     h[s, len(all_h[i-1][s]):, :] = 0
@@ -325,12 +324,15 @@ def generate_mols_for_pocket(n_samples,
 
                                     reverted = True  
                                 else:
-                                    print('previous fragment had more atoms...')
+                                    # previous fragment had more atoms...
                                     diff = len(all_x[i-1][s])-x.shape[1] 
                                     x = F.pad(x, (0,0,0, diff))
                                     h = F.pad(h, (0,0,0, diff))
                                     pocket_x[s] = all_pocket_x[i-1][s]
-                                    all_grids[s] = total_grids[i-1][s]
+                                    #all_grids[s] = total_grids[i-1][s]
+                                    all_grids[s] = all_grids[s] + anchor_pos[s].cpu() # shift back the grid points
+                                    all_H_coords[s] = all_H_coords[s] + anchor_pos[s] # shift back the H atoms
+
                                     all_frag_sizes[s,i] = 0
                                     extension_masks = F.pad(extension_masks, (0, diff))
                                     scaffold_masks = F.pad(scaffold_masks, (0, diff))
@@ -345,10 +347,14 @@ def generate_mols_for_pocket(n_samples,
                         else:
                             if len(all_x[i-1][s]) <= x.shape[1]: # TODO: going back to previous step for other case needs padding with zeros (rarely happens)
                                 print(f'rejecting the fragment {i} for molecule {s}')
+                                rejected[s] = 1 # rejected the new fragment
                                 x[s, :len(all_x[i-1][s]), :] = all_x[i-1][s]
                                 h[s, :len(all_h[i-1][s]), :] = all_h[i-1][s]
                                 pocket_x[s] = all_pocket_x[i-1][s]
-                                all_grids[s] = total_grids[i-1][s]
+                                #all_grids[s] = total_grids[i-1][s]
+                                all_grids[s] = all_grids[s] + anchor_pos[s].cpu() # shift back the grid points
+                                all_H_coords[s] = all_H_coords[s] + anchor_pos[s] # shift back the H atoms
+
                                 x[s, len(all_x[i-1][s]):, :] = 0
                                 h[s, len(all_h[i-1][s]):, :] = 0
                                 all_frag_sizes[s,i] = 0
@@ -360,12 +366,17 @@ def generate_mols_for_pocket(n_samples,
                                 scaffold_masks[s, len(all_scaffold_masks[i-1][s]):] = 0
                                 reverted = True
                             else:
-                                print('previous fragment had more atoms ... ') 
+                                # prev fragment had more atoms
+                                rejected[s] = 1 # rejected the new fragment
+
                                 diff = len(all_x[i-1][s])-x.shape[1] 
                                 x = F.pad(x, (0,0,0, diff))
                                 h = F.pad(h, (0,0,0, diff))
                                 pocket_x[s] = all_pocket_x[i-1][s]
-                                all_grids[s] = total_grids[i-1][s]
+                                #all_grids[s] = total_grids[i-1][s]
+                                all_grids[s] = all_grids[s] + anchor_pos[s].cpu() # shift back the grid points
+                                all_H_coords[s] = all_H_coords[s] + anchor_pos[s]
+
                                 all_frag_sizes[s,i] = 0
                                 extension_masks = F.pad(extension_masks, (0, diff))
                                 scaffold_masks = F.pad(scaffold_masks, (0, diff))
@@ -373,17 +384,29 @@ def generate_mols_for_pocket(n_samples,
                                 h[s, :len(all_h[i-1][s]), :] = all_h[i-1][s]
                                 extension_masks[s, :len(all_extension_masks[i-1][s])] = all_extension_masks[i-1][s]
                                 scaffold_masks[s, :len(all_scaffold_masks[i-1][s])] = all_scaffold_masks[i-1][s]
-                                reverted = True
+                                reverted = True 
                     
                     if not reverted:
                         generation_steps[s] = i
                         steps[s] += 1
 
                     prev_ext_sizes.append(all_frag_sizes[s, generation_steps[s]])
+
+                print('number of clashes', all_clashes) 
+                print('rejected frags', rejected)
             else:
                 prev_ext_sizes = all_frag_sizes[:,i]
                 steps += 1
-              
+
+            ## mask the grids that have been occupied by the generated molecule
+            for l in range(n_samples):
+                if rejected[l] == 0:
+                    mol_mask = (extension_masks[l].cpu().bool() | scaffold_masks[l].cpu().bool())
+                    mol_coords = x[l].cpu()[mol_mask]
+                    mol_dists = torch.cdist(all_grids[l].float(), mol_coords)
+                    mask_grids = (mol_dists < 2).any(dim=1) # mask based on 2 A distance
+                    all_grids[l] = all_grids[l][~mask_grids]  
+
             # -----------------------------------------------------------------------------------------------------------------
             all_x.append(x)
             all_h.append(h)

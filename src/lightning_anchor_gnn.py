@@ -3,9 +3,7 @@ import torch
 import pytorch_lightning as pl
 
 from torch.nn.functional import sigmoid
-from src import utils
 from src.datasets import HierCrossDockDataset, get_dataloader, collate_pocket_aux
-from src import const
 from src.anchor_gnn import AnchorGNNPocket
 
 from typing import Dict, List, Optional

@@ -1,46 +1,39 @@
-import json
 import numpy as np
 import pandas as pd
 import os
-from tqdm import tqdm 
-from itertools import combinations
 import argparse
 
 from rdkit import Chem
 import torch
 import time
 import shutil
-from pathlib import Path
-import torch.nn.functional as F
+from scipy.spatial import distance
+from rdkit.Chem import rdmolfiles
 
 from utils.volume_sampling import sample_discrete_number, bin_edges, prob_dist_df
-from utils.volume_sampling import remove_output_files, run_fpocket, extract_values
 from utils.templates import get_one_hot, get_pocket
+from utils.templates import add_hydrogens, extract_hydrogen_coordinates, run_fpocket, extract_values
 
 from src.lightning_anchor_gnn import AnchorGNN_pl
 from src.lightning import AR_DDPM
-from scipy.spatial import distance
+from src.const import prot_mol_lj_rm, CROSSDOCK_LJ_RM
+from src.noise import cosine_beta_schedule
 
 from analysis.reconstruct_mol import reconstruct_from_generated
-from analysis.vina_docking import VinaDockingTask
-
-from rdkit.Chem import rdmolfiles
+#from analysis.vina_docking import VinaDockingTask
 from sampling.sample_mols import generate_mols_for_pocket
 
 atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'B': 4, 'Br': 5, 'Cl': 6, 'P': 7, 'I': 8, 'F': 9}
 idx2atom = {0:'C', 1:'N', 2:'O', 3:'S', 4:'B', 5:'Br', 6:'Cl', 7:'P', 8:'I', 9:'F'}
 CROSSDOCK_CHARGES = {'C': 6, 'O': 8, 'N': 7, 'F': 9, 'B':5, 'S': 16, 'Cl': 17, 'Br': 35, 'I': 53, 'P': 15}
 pocket_atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3} # only 4 atoms types for pocket
-
 vdws = {'C': 1.7, 'N': 1.55, 'O': 1.52, 'S': 1.8, 'B': 1.92, 'Br': 1.85, 'Cl': 1.75, 'P': 1.8, 'I': 1.98, 'F': 1.47}
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--results-path', type=str, default='results',
-                    help='path to save the results ')
+                    help='path to save the results')
 parser.add_argument('--data-path', action='store', type=str, default='/srv/home/mahdi.ghorbani/FragDiff/crossdock',
                         help='path to the test data for generating molecules')
-parser.add_argument('--use-anchor-model', action='store_true', default=False,
-                    help='Whether to use an anchor prediction model')
 parser.add_argument('--anchor-model', type=str, default='anchor_model.ckpt',
                     help='path to the anchor model. Note that for guidance, the anchor model should incorporate the conditionals')
 parser.add_argument('--n-samples', type=int, default=20,
@@ -59,15 +52,13 @@ if __name__ == '__main__':
     data_path = args.data_path
     diff_model_checkpoint = args.diff_model
 
-    model = AR_DDPM.load_from_checkpoint(diff_model_checkpoint, device=torch_device) # load diffusion model
+    add_H = True # adding hydrogens to protein for LJ computation
+    model = AR_DDPM.load_from_checkpoint(diff_model_checkpoint, device=torch_device) 
     model = model.to(torch_device)
 
-    if args.use_anchor_model is not None:
-        anchor_model = AnchorGNN_pl.load_from_checkpoint(anchor_checkpoint, device=torch_device)
-        anchor_model = anchor_model.to(torch_device)
-    else:
-        anchor_model = None # TODO: implement random anchor selection
-    
+    anchor_model = AnchorGNN_pl.load_from_checkpoint(anchor_checkpoint, device=torch_device)    
+    anchor_model = anchor_model.to(torch_device)
+
     split = torch.load(data_path + '/' + 'split_by_name.pt')
     prefix = data_path + '/crossdocked_pocket10/'
 
@@ -88,7 +79,7 @@ if __name__ == '__main__':
         min_coords = pocket_coords.min(axis=0) - 2.5 # 
         max_coords = pocket_coords.max(axis=0) + 2.5
 
-        x_range = slice(min_coords[0], max_coords[0] + 1, 1.5) # spheres of radius 1.5 (vdw radius of C)
+        x_range = slice(min_coords[0], max_coords[0] + 1, 1.5) # spheres of radius 1.5 
         y_range = slice(min_coords[1], max_coords[1] + 1, 1.5)
         z_range = slice(min_coords[2], max_coords[2] + 1, 1.5)
 
@@ -109,20 +100,28 @@ if __name__ == '__main__':
         max_mol_sizes = []
 
         fpocket_out = prot_name[:-4] + '_out'
+
         shutil.rmtree(fpocket_out, ignore_errors=True)
 
+        if add_H:
+            add_hydrogens(prot_name)
+            prot_name_with_H = prot_name[:-4] + '_H.pdb'
+
+            H_coords = extract_hydrogen_coordinates(prot_name_with_H)
+            H_coords = torch.tensor(H_coords).float().to(torch_device)
         #print('running fpocket!')
         #try:
         #    run_fpocket(prot_name)
         #except:
         #    print('Error in running fpocket! using random sizes')
-
         # NOTE: using original molecule coordinates for making the grid
 
         grids = torch.tensor(grids)
         all_grids = [] # list of grids
+        all_H_coords = []
         for i in range(n_samples):
             all_grids.append(grids) 
+            all_H_coords.append(H_coords)
 
         pocket_vol = len(grids)
         #if os.path.exists(fpocket_out):
@@ -147,7 +146,14 @@ if __name__ == '__main__':
         t1 = time.time()
 
         max_mol_sizes = np.array(max_mol_sizes)
+
         print('maximum sizes for molecules', max_mol_sizes)
+        prot_mol_lj_rm = torch.tensor(prot_mol_lj_rm).to(torch_device)
+        mol_mol_lj_rm = torch.tensor(CROSSDOCK_LJ_RM).to(torch_device) / 100
+
+        lj_weight_scheduler = cosine_beta_schedule(500, s=0.01, raise_to_power=2)
+        weights = 1 - lj_weight_scheduler 
+        weights = np.clip(weights, a_min=0.1, a_max=1.)
         x, h, mol_masks  = generate_mols_for_pocket(n_samples=n_samples, 
                                                     num_frags=8, 
                                                     pocket_size=pocket_size, 
@@ -158,11 +164,14 @@ if __name__ == '__main__':
                                                     diff_model=model, 
                                                     device=torch_device,
                                                     return_all=False,
-                                                    prot_path=prot_name,
                                                     max_mol_sizes=max_mol_sizes,
                                                     all_grids=all_grids,
                                                     rejection_sampling=args.rejection_sampling,
-                                                    rejection_criteria='clash')
+                                                    lj_guidance=True,
+                                                    prot_mol_lj_rm=prot_mol_lj_rm,
+                                                    mol_mol_lj_rm=mol_mol_lj_rm,
+                                                    all_H_coords=all_H_coords,
+                                                    guidance_weights=weights)
         
         x = x.cpu().numpy()
         h = h.cpu().numpy()
@@ -181,6 +190,7 @@ if __name__ == '__main__':
 
             try:
                 mol_rec = reconstruct_from_generated(x_mol.tolist(), atomic_nums)
+                Chem.Kekulize(mol_rec)
                 all_mols.append(mol_rec)
             except:
                 continue

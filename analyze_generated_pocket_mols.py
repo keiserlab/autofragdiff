@@ -13,11 +13,9 @@ from rdkit import RDLogger
 from openbabel import openbabel
 
 from analysis import eval_bond_length
-from analysis.reconstruct_mol import reconstruct_from_generated, MolReconsError, make_mol_openbabel
-from analysis.metrics import is_connected, is_valid, get_chem
+from analysis.reconstruct_mol import reconstruct_from_generated
+from analysis.metrics import is_connected, get_chem
 from analysis.eval_bond_angles import get_distribution, eval_angle_dist_profile, find_angle_dist
-from analysis.vina_docking import VinaDockingTask
-from joblib import Parallel, delayed
 from analysis.bond_angle_config import frag1_angles_bins_CROSSDOCK, frag1_dihedral_bins_CROSSDOCK, \
                                        frag2_angles_bins_CROSSDOCK, frag2_dihedral_bins_CROSSDOCK, \
                                        frag3_angles_bins_CROSSDOCK, frag3_dihedral_bins_CROSSDOCK, \
@@ -26,7 +24,6 @@ from analysis.bond_angle_config import frag1_angles_bins_CROSSDOCK, frag1_dihedr
 
 from analysis.docking import calculate_qvina2_score, sdf_to_pdbqt
 from src.utils import get_logger
-import collections
 import torch
 
 atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'B': 4, 'Br': 5, 'Cl': 6, 'P': 7, 'I': 8, 'F': 9}
@@ -232,18 +229,17 @@ if __name__ == '__main__':
     print('fraction_valid is :' , fraction_valid)
 
     c_bond_length_profile = eval_bond_length.get_bond_length_profile(all_bond_dist,)
-    c_bond_length_dict = eval_bond_length.eval_bond_length_profile(c_bond_length_profile, data_type='CrossDock')
+    c_bond_length_dict = eval_bond_length.eval_bond_length_profile(c_bond_length_profile)
     logger.info('JS bond distances of complete mols: ')
     print_dict(c_bond_length_dict, logger)
 
     print('success mols JS metrics: ')
     success_pair_length_profile = eval_bond_length.get_pair_length_profile(success_pair_dist)
-    success_js_metrics = eval_bond_length.eval_pair_length_profile(success_pair_length_profile, data_type='CrossDock')
+    success_js_metrics = eval_bond_length.eval_pair_length_profile(success_pair_length_profile)
     print_dict(success_js_metrics, logger)
 
     eval_bond_length.plot_distance_hist(success_pair_length_profile,
                                         metrics=success_js_metrics,
-                                        data_type='CrossDock',
                                         save_path=os.path.join(eval_path, f'pair_dist_hist.png'))
     
     # ------ ANGLE distribution ------
@@ -264,11 +260,11 @@ if __name__ == '__main__':
     angle_profile_frag5 = get_distribution(all_frag5_angles, frag5_angles_bins_CROSSDOCK)
     dihedral_profile_frag5 = get_distribution(all_frag5_dihedrals, frag5_dihedral_bins_CROSSDOCK)
     
-    eval_frag1 = eval_angle_dist_profile(angle_profile_frag1, dihedral_profile_frag1, Chem.MolToSmiles(frag1), data_type='CrossDock')
-    eval_frag2 = eval_angle_dist_profile(angle_profile_frag2, dihedral_profile_frag2, Chem.MolToSmiles(frag2), data_type='CrossDock')
-    eval_frag3 = eval_angle_dist_profile(angle_profile_frag3, dihedral_profile_frag3, Chem.MolToSmiles(frag3), data_type='CrossDock')
-    eval_frag4 = eval_angle_dist_profile(angle_profile_frag4, dihedral_profile_frag4, Chem.MolToSmiles(frag4), data_type='CrossDock')
-    eval_frag5 = eval_angle_dist_profile(angle_profile_frag5, dihedral_profile_frag5, Chem.MolToSmiles(frag5), data_type='CrossDock')
+    eval_frag1 = eval_angle_dist_profile(angle_profile_frag1, dihedral_profile_frag1, Chem.MolToSmiles(frag1))
+    eval_frag2 = eval_angle_dist_profile(angle_profile_frag2, dihedral_profile_frag2, Chem.MolToSmiles(frag2))
+    eval_frag3 = eval_angle_dist_profile(angle_profile_frag3, dihedral_profile_frag3, Chem.MolToSmiles(frag3))
+    eval_frag4 = eval_angle_dist_profile(angle_profile_frag4, dihedral_profile_frag4, Chem.MolToSmiles(frag4))
+    eval_frag5 = eval_angle_dist_profile(angle_profile_frag5, dihedral_profile_frag5, Chem.MolToSmiles(frag5))
 
     print('JS of angles for fragment 1:')
     print_dict(eval_frag1, logger)
@@ -297,7 +293,7 @@ if __name__ == '__main__':
         'frag3_JS': eval_frag3,
         'frag4_JS': eval_frag4,
         'frag5_JS': eval_frag5
-    }, os.path.join(eval_path, 'metrics2.pt'))
+    }, os.path.join(eval_path, 'metrics.pt'))
 
     all_qed = [results['all_results'][j][i]['QED'] for j in range(n_files) for i in range(len(results['all_results'][j]))]
     all_sa = [results['all_results'][j][i]['SA'] for j in range(n_files) for i in range(len(results['all_results'][j]))]

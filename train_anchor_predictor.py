@@ -1,14 +1,10 @@
 import argparse
 import os
-import pwd
 import sys
-import datetime
-from src.const import GEOM_NUMBER_OF_ATOM_TYPES, CROSSDOCK_NUMBER_OF_ATOMS
 from src.lightning_anchor_gnn import AnchorGNN_pl
 from src.utils import disable_rdkit_logging, Logger
 from pytorch_lightning import Trainer, callbacks, loggers
 from pytorch_lightning.loggers import TensorBoardLogger
-import wandb
 
 def find_last_checkpoint(checkpoints_dir):
     epoch2fname = [

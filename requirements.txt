@@ -1,6 +1,6 @@
 pip install rdkit
 conda install -c conda-forge openbabel
-pip3 install torch torchvision torchaudio 
+pip3 install torch torchvision torchaudio
 pip install biopython
 pip install biopandas
 pip install networkx

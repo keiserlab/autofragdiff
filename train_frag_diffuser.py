@@ -1,15 +1,12 @@
 import argparse
 import os
-import pwd
 import sys
-import datetime
 
 from src.const import GEOM_NUMBER_OF_ATOM_TYPES, CROSSDOCK_NUMBER_OF_ATOMS
 from src.lightning import AR_DDPM
 from src.utils import disable_rdkit_logging, Logger
 from pytorch_lightning import Trainer, callbacks, loggers
 from pytorch_lightning.loggers import TensorBoardLogger
-import wandb
 from src import const
 
 def find_last_checkpoint(checkpoints_dir):

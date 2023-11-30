@@ -1,26 +1,13 @@
 import numpy as np
 import pandas as pd
 import os
-from tqdm import tqdm 
-from itertools import combinations
-import argparse
 
 from rdkit import Chem
-from rdkit.Chem import AllChem
-from openbabel import openbabel
-import tempfile
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa
 
-from torch.utils.data import Dataset, DataLoader
 import torch
-from src.datasets import HierCrossDockDataset, pairwise_distances
-from src import anchor_gnn
 from src import const
-from src.const import EXTENSION_SIZE_DIST_CROSSDOCK, NUM_FRAGS_DIST_CROSSDOCK
-from src import utils
-from src.extension_size import DistributionNodes
-import time
 
 from Bio.PDB import PDBParser
 from Bio.PDB.Polypeptide import is_aa, three_to_one
@@ -30,6 +17,29 @@ amino_acid_dict = {'A': 0, 'C': 1, 'D': 2, 'E': 3, 'F': 4, 'G': 5, 'H': 6, 'I': 
 pocket_atom_dict =  {'C': 0, 'N': 1, 'O': 2, 'S': 3} # only 4 atoms types for pocket
 atom_dict = {'C': 0, 'N': 1, 'O': 2, 'S': 3, 'B': 4, 'Br': 5, 'Cl': 6, 'P': 7, 'I': 8, 'F': 9}
 idx2atom = {0:'C', 1:'N', 2:'O', 3:'S', 4:'B', 5:'Br', 6:'Cl', 7:'P', 8:'I', 9:'F'}
+
+def add_hydrogens(pdf_file):
+    """
+    Add hydrogens to a PDB file using reduce.
+    """
+    #print('adding hydrogens')
+    out_pdb = pdf_file[:-4] + '_H.pdb'
+    os.system(f'reduce -Quiet -NOFLIP {pdf_file} > {out_pdb}')
+
+def extract_hydrogen_coordinates(pdb_file):
+    coordinates = []
+
+    with open(pdb_file, 'r') as file:
+        for line in file:
+            if line.startswith("ATOM") or line.startswith("HETATM"):
+                atom_name = line[12:16].strip()
+                if atom_name.startswith('H'):
+                    x = float(line[30:38].strip())
+                    y = float(line[38:46].strip())
+                    z = float(line[46:54].strip())
+                    coordinates.append([x, y, z])
+
+    return np.array(coordinates)
 
 def get_one_hot(atom, atoms_dict):
     one_hot = np.zeros(len(atoms_dict))

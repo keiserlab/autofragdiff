@@ -3,12 +3,8 @@ from rdkit.Chem import rdMolDescriptors
 import pickle
 
 import math
-from collections import defaultdict
-
-import os.path as op
 
 _fscores = None
-
 
 def readFragmentScores(name='fpscores'):
     import gzip
