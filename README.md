@@ -100,7 +100,7 @@ https://drive.google.com/drive/folders/1DQwIfibHIoFPGJP6aHBGiYRp87bCZFA0?usp=sha
 
 ## CrossDock pocket-based molecule generation:
 
-To generate molecules from trained pocket-based model, also use anchor-predictor and fragment size predictor models
+To generate molecules from trained pocket-based model, also use anchor-predictor model. fragment sizes are sampled from the data distribution.
 
 ## CrossDock pocket-based molecule generation (with guidance):
 
